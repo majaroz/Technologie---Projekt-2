@@ -1,0 +1,218 @@
+import cv2
+import mediapipe as mp
+import os
+import numpy as np
+
+# Zmienne określające wielkość okienka - do zmiany chyba
+global_frame_width = 640
+global_frame_height = 480
+
+# Wprowadzenie MediaPipe FaceMesh - tutaj powinien rozpoznawać twarz (już wyłączyłam nanoszenie punktów)
+mp_drawing = mp.solutions.drawing_utils
+mp_face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+
+# Adres plików - do zmiany (folder zip na github)
+ACCESSORY_DIR = "C:\\Users\\Maja\\Downloads\\accessories"
+
+# Lista rodzajów akcesoriów - tak samo są pogrupowane w folderze
+accessories = ["hat", "scarf", "glasses", "crown"]
+selected_accessory = accessories[0]
+accessory_images = {acc: [] for acc in accessories}
+current_image_index = {acc: 0 for acc in accessories}
+
+# Załadowanie zdjęć akcesoriów z folderu
+for acc in accessories:
+    acc_path = os.path.join(ACCESSORY_DIR, acc)
+    if os.path.exists(acc_path):
+        accessory_images[acc] = [
+            os.path.join(acc_path, f)
+            for f in os.listdir(acc_path)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+
+# Parametry skali
+scale_up = 1.25  # Wszystkie akcesoria powiększone o 25% - potem modyfikuję tą wielkość wg konkretnych rzeczy
+offset_scarf = 10  # Offset dla "scarf"
+
+
+def overlay_alpha(background, overlay, x, y):
+    """
+    Nakładamy obraz z kanałem alfa na tło w pozycji (x, y), upewniając się, że rozmiary są kompatybilne
+
+    """
+    if overlay is None:
+        return background
+
+    b_h, b_w, _ = background.shape
+    o_h, o_w, channels = overlay.shape
+
+    # jeśli overlay jest większy niż tło - poprawia to
+    if o_w > b_w or o_h > b_h:
+        scale_factor = min(b_w / o_w, b_h / o_h)
+        overlay = cv2.resize(overlay, (int(o_w * scale_factor), int(o_h * scale_factor)))
+    o_h, o_w, _ = overlay.shape
+
+    # sprawdzamy czy pozycja mieści się w limicie
+    x = max(0, min(x, b_w - o_w))
+    y = max(0, min(y, b_h - o_h))
+
+    if channels == 4:
+        alpha = overlay[:, :, 3] / 255.0
+    else:
+        alpha = np.ones((o_h, o_w))
+
+    for c in range(3):
+        background[y:y + o_h, x:x + o_w, c] = (
+                alpha * overlay[:, :, c] + (1 - alpha) * background[y:y + o_h, x:x + o_w, c]
+        )
+    return background
+
+
+def draw_menu(frame):
+    """
+    Tworzę menu z wyborem konkretnego akcesowium na górze i po bokach przyciski '<' i '>' - działa też na strzałki
+    """
+    menu_height = 50
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], menu_height), (50, 50, 50), -1)
+    x_offset = 10
+    for i, accessory in enumerate(accessories):
+        color = (0, 255, 0) if accessory == selected_accessory else (200, 200, 200)
+        cv2.putText(frame, accessory, (x_offset, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        x_offset += 150
+    cv2.putText(frame, "<", (50, frame.shape[0] // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(frame, ">", (frame.shape[1] - 50, frame.shape[0] // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+
+def mouse_callback(event, x, y, flags, param):
+    """
+    Tutaj zaczyna działać menu - można zmienić akcesorium wewnątrz folderu strzałkami i zmieniać rodzaj akcesorium w menu
+    """
+    global selected_accessory, current_image_index, global_frame_width
+    menu_height = 50
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if y < menu_height:
+            index = x // 150
+            if index < len(accessories):
+                selected_accessory = accessories[index]
+        elif x < 100:  # Botón '<'
+            if accessory_images[selected_accessory]:
+                current_image_index[selected_accessory] = (
+                                                                  current_image_index[selected_accessory] - 1
+                                                          ) % len(accessory_images[selected_accessory])
+        elif x > global_frame_width - 100:  # Botón '>'
+            if accessory_images[selected_accessory]:
+                current_image_index[selected_accessory] = (
+                                                                  current_image_index[selected_accessory] + 1
+                                                          ) % len(accessory_images[selected_accessory])
+
+
+# Otwieram kamerę - jakby nie działała kamera lub co innego to to pokazuje (dużo razy tak miałam więc dodałam to)
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Nie można otworzyć kamery")
+    exit()
+
+cv2.namedWindow("FaceMesh con Accesorios")
+cv2.setMouseCallback("FaceMesh con Accesorios", mouse_callback)
+
+while True:
+    success, frame = cap.read()
+    if not success:
+        print("Error: Nie można otworzyć frame")
+        break
+
+    # Aktualizuje aktualne wymiary ramki
+    global_frame_height, global_frame_width = frame.shape[:2]
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = mp_face_mesh.process(rgb_frame)
+
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            h, w, _ = frame.shape
+            landmarks = face_landmarks.landmark
+
+            # Zapisujemy landmarki (ważne punkty dla akcesoriów)
+            left_eye = landmarks[33]  # lewe oko
+            right_eye = landmarks[263]  # prawe oko
+            forehead = landmarks[10]  # czoło
+            chin = landmarks[152]  # podbródek
+
+            lx, ly = int(left_eye.x * w), int(left_eye.y * h)
+            rx, ry = int(right_eye.x * w), int(right_eye.y * h)
+            fx, fy = int(forehead.x * w), int(forehead.y * h)
+            cx, cy = int(chin.x * w), int(chin.y * h)
+
+            # Obliczam szerokość twarzy bazując na pozycjach oczu
+            face_width = int((rx - lx) * 1.5)
+
+            if accessory_images[selected_accessory]:
+                acc_path = accessory_images[selected_accessory][current_image_index[selected_accessory]]
+                overlay = cv2.imread(acc_path, cv2.IMREAD_UNCHANGED)
+                if overlay is not None:
+                    # Nowe wymiary zachowując proporcje obrazu
+                    aspect_ratio = overlay.shape[1] / overlay.shape[0]
+                    new_width = int(face_width * scale_up)
+                    new_height = int(new_width / aspect_ratio)
+
+                    if selected_accessory == "hat":
+                        # wszystkie czapki niżej o 20% - wyglądały jakby lewitowały wcześniej, ale nie będzie idealnie nigdy
+                        # plik 'buckethat.png' powiększony o 40% - był mikto mały
+                        # plik 'cap.png' niżej o 30% - jeszcze bardziej lewitowała
+                        if os.path.basename(acc_path).lower() == "buckethat.png":
+                            new_width = int(new_width * 1.4)
+                            new_height = int(new_height * 1.4)
+                            overlay = cv2.resize(overlay, (new_width, new_height))
+                            pos_x = fx - new_width // 2
+                            pos_y = (fy - new_height) + int(new_height * 0.20)
+                        elif os.path.basename(acc_path).lower() == "cap.png":
+                            overlay = cv2.resize(overlay, (new_width, new_height))
+                            pos_x = fx - new_width // 2
+                            pos_y = (fy - new_height) + int(new_height * 0.30)
+                        else:
+                            overlay = cv2.resize(overlay, (new_width, new_height))
+                            pos_x = fx - new_width // 2
+                            pos_y = (fy - new_height) + int(new_height * 0.20)
+                        frame = overlay_alpha(frame, overlay, pos_x, pos_y)
+                    elif selected_accessory == "glasses":
+                        # okulary pomiędzy oczami - najlepiej to wychodzi
+                        center_x = lx + (rx - lx) // 2
+                        pos_x = center_x - new_width // 2
+                        pos_y = ly - new_height // 2
+                        overlay = cv2.resize(overlay, (new_width, new_height))
+                        frame = overlay_alpha(frame, overlay, pos_x, pos_y)
+                    elif selected_accessory == "scarf":
+                        # szalik jeśli jest to 'scarf.png' to zmieniamy wielkość - on ma jakiś problem, generalnie tak jak z czakami tu też nie będzie idealnie
+                        overlay = cv2.resize(overlay, (new_width, new_height))
+                        if os.path.basename(acc_path).lower() == "scarf.png":
+                            new_width = int(new_width * 1.9)
+                            new_height = int(new_height * 1.9)
+                            overlay = cv2.resize(overlay, (new_width, new_height))
+                        pos_y = cy + offset_scarf
+                        pos_x = cx - new_width // 2
+                        frame = overlay_alpha(frame, overlay, pos_x, pos_y)
+                    else:
+                        # tiara nad czołem - też spoko to wygląda
+                        overlay = cv2.resize(overlay, (new_width, new_height))
+                        pos_x = fx - new_width // 2
+                        pos_y = fy - new_height
+                        frame = overlay_alpha(frame, overlay, pos_x, pos_y)
+
+    draw_menu(frame)
+    cv2.imshow("FaceMesh con Accesorios", frame)
+
+    key = cv2.waitKeyEx(5)
+    if key == 27:  # Esc żeby wyjść
+        break
+    elif key in [2424832]:  # lewa strzałka - tu dopiero jest na klawiaturę dodane ('<')
+        if accessory_images[selected_accessory]:
+            current_image_index[selected_accessory] = (current_image_index[selected_accessory] - 1) % len(
+                accessory_images[selected_accessory])
+    elif key in [2555904]:  # prawa strzałka - same
+        if accessory_images[selected_accessory]:
+            current_image_index[selected_accessory] = (current_image_index[selected_accessory] + 1) % len(
+                accessory_images[selected_accessory])
+
+cap.release()
+cv2.destroyAllWindows()
+mp_face_mesh.close()
